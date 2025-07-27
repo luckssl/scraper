@@ -65,7 +65,7 @@ def scrape(site: Site):
         pagina = contexto.new_page()
 
         pagina.goto(site.url)
-        #simular_humano()
+        simular_humano()
         scroll_lento(pagina)
 
         if site.nome == "Compras Paraguai":
@@ -74,7 +74,7 @@ def scrape(site: Site):
             pag = f"https://www.comprasparaguai.com.br{prox_pag}"
             pagina.goto(pag)
 
-        #simular_humano()
+        simular_humano()
         scroll_lento(pagina)
 
         # Espera os produtos carregarem
@@ -97,7 +97,7 @@ def scrape(site: Site):
                 })
             except:
                 continue
-            #simular_humano(0.3, 0.8)
+            simular_humano(0.3, 0.8)
 
         navegador.close()
         return resultados
