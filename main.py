@@ -5,23 +5,41 @@ import json
 from objects import *
 import random
 import csv
+import logging
+import os
+from datetime import datetime
 
-def seguro_para_int(valor):
-    try:
-        return int(valor)
-    except (ValueError, TypeError):
-        return None
+agora = datetime.now()
+timestamp = agora.strftime("%Y-%m-%d_%H-%M")
+
+# def seguro_para_int(valor): ALTERACAO 27/07/25
+#     try:
+#         return int(valor)
+#     except (ValueError, TypeError):
+#         return None
+
+# Configuração do logger
+logging.basicConfig(
+    filename="erros_scraper.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.ERROR
+)
 
 def extrair_preco(preco: str):
-    preco_limpo = []
-    for i in range(len(preco)):
-        if preco[i] in ['\n', ' ']:
-            i += 1
-            while i < len(preco) and preco[i] != '\n' and preco[i] != '':
-                preco_limpo.append(preco[i])
+    try:
+        preco_limpo = []
+        for i in range(len(preco)):
+            if preco[i] in ['\n', ' ']:
                 i += 1
-            break
-    return float(''.join(preco_limpo).replace(".", "").replace(",", ".")) if preco_limpo else None
+                while i < len(preco) and preco[i] != '\n' and preco[i] != '':
+                    preco_limpo.append(preco[i])
+                    i += 1
+                break
+        return float(''.join(preco_limpo).replace(".", "").replace(",", ".")) if preco_limpo else None
+    except Exception as e:
+        logging.error(f"Erro ao formatar '{preco}' para float\nErro: {e}", exc_info=True)
+        return None
     
 
 def simular_humano(min_s=1.5, max_s=3.0):
@@ -35,14 +53,15 @@ def scroll_lento(pagina, vezes=4):
 def filtrar_produtos(dados, entry):
     produtos_filtrados = []
     for produto in dados:
-        titulo_palavras = produto["titulo"].lower().split()
-        nome_pesquisa = entry.lower().split()
-        if all(palavra in titulo_palavras for palavra in nome_pesquisa):
-            produto["preco"] = extrair_preco(produto["preco"])
-            if produto["preco"]:
-                produtos_filtrados.append(produto)
-            else: continue
-        
+        try:
+            titulo_palavras = produto["titulo"].lower().split()
+            nome_pesquisa = entry.lower().split()
+            if all(palavra in titulo_palavras for palavra in nome_pesquisa):
+                produto["preco"] = extrair_preco(produto["preco"])
+                if produto["preco"] is not None:
+                    produtos_filtrados.append(produto)
+        except Exception as e:
+            logging.error(f"Erro inesperado ao filtrar produto: {produto}\nErro: {e}", exc_info=True)
     return produtos_filtrados
 
 def scrape(site: Site):
@@ -63,16 +82,23 @@ def scrape(site: Site):
             java_script_enabled=True,
         )
         pagina = contexto.new_page()
-
-        pagina.goto(site.url)
+        try:
+            pagina.goto(site.url)
+        except Exception as e:
+            logging.error(f"Erro ao tentar redirecionar o navegador para: {site.url}\nErro: {e}", exc_info=True)
+            return []
         simular_humano()
         scroll_lento(pagina)
 
         if site.nome == "Compras Paraguai":
-            pagina.wait_for_selector("a.truncate", timeout=10000)
-            prox_pag = pagina.query_selector("a.truncate").get_attribute("href")
-            pag = f"https://www.comprasparaguai.com.br{prox_pag}"
-            pagina.goto(pag)
+            try:
+                pagina.wait_for_selector("a.truncate", timeout=10000)
+                prox_pag = pagina.query_selector("a.truncate").get_attribute("href")
+                pag = f"https://www.comprasparaguai.com.br{prox_pag}"
+                pagina.goto(pag)
+            except Exception as e:
+                logging.error(f"Erro ao tentar redirecionar o navegador para: {pag}\nErro: {e}", exc_info=True)
+                return []
 
         simular_humano()
         scroll_lento(pagina)
@@ -90,12 +116,19 @@ def scrape(site: Site):
                 preco = produto.query_selector(site.seletor_preco).inner_text().strip()
                 link = produto.query_selector("a").get_attribute("href")
 
-                resultados.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "link": link
-                })
-            except:
+                if titulo and preco and link:
+                    if site.nome == "Compras Paraguai":
+                        link = f"https://www.comprasparaguai.com.br{link}"
+
+                    resultados.append({
+                        "titulo": titulo,
+                        "preco": preco,
+                        "link": link
+                    })
+                else:
+                    logging.info(f"Scraper não conseguiu obter algum dos campos de {produto}, pulando item")
+            except Exception as e:
+                logging.error(f"Não foi possível obter dados do produto (WebElement: {produto})\nErro: {e}", exc_info=True)
                 continue
             simular_humano(0.3, 0.8)
 
@@ -105,36 +138,61 @@ def scrape(site: Site):
 def obter_dados(site, entry):
     prodBruto = scrape(site)
 
+    if len(prodBruto) == 0:
+        logging.info(f"Não foi possível obter dados de {entry} em {site.nome}")
+        return prodBruto
+
     prodFilt = filtrar_produtos(prodBruto, entry)
+
+    if len(prodFilt) == 0:
+        logging.info(f"Não há resultados correspondentes a {entry} em {site.nome}")
+        return prodFilt
 
     prodOrd = sorted(prodFilt, key=lambda x: x["preco"])
 
-    converte_json(site, prodOrd)
+    converte_json(site, prodOrd, entry)
 
-    return prodFilt
+    return prodOrd
 
-def converte_json(site, produtos):
-    nome_arquivo = f"{site.nome.replace(' ', '_')}.json"
-    with open(nome_arquivo, "w", encoding="utf-8") as f:
-        json.dump(produtos, f, ensure_ascii=False, indent=4)
-    print(f"Resultados salvos em: {nome_arquivo}")
+def converte_json(site, produtos, entry):
+    try:
+        nome_arquivo = f"{site.nome.replace(' ', '_').lower()}_{entry.replace(' ', '_').lower()}_{timestamp}.json"
+        with open(f"data\{nome_arquivo}", "w", encoding="utf-8") as f:
+            json.dump(produtos, f, ensure_ascii=False, indent=4)
+        print(f"Resultados salvos em: {nome_arquivo}")
+    except Exception as e:
+        logging.critical(f"Erro ao criar {nome_arquivo}\nErro: {e}", exc_info=True)
 
-def converte_csv(prods_venda, prods_compra):
-    with open("produtos_venda.csv", "w", newline="", encoding="utf-8") as csvfile:
-        campos = ["titulo", "preco", "link"]
-        writer = csv.DictWriter(csvfile, fieldnames=campos)
-        writer.writeheader()
-        for produto in prods_venda:
-            writer.writerow({k: produto[k] for k in campos})
+def converte_csv(prods_venda, prods_compra, entry):
+    nome_arquivo = f"produtos_venda_{entry}_{timestamp}.csv"
+    try:
+        with open(f"data\{nome_arquivo.replace(' ', '_').lower()}", "w", newline="", encoding="utf-8") as csvfile:
+            campos = ["titulo", "preco", "link"]
+            writer = csv.DictWriter(csvfile, fieldnames=campos)
+            writer.writeheader()
+            for produto in prods_venda:
+                writer.writerow({k: produto[k] for k in campos})
+    except Exception as e:
+        logging.critical(f"Erro ao criar {nome_arquivo}\nErro: {e}", exc_info=True)
 
-    with open("produtos_compra.csv", "w", newline="", encoding="utf-8") as csvfile:
-        campos = ["titulo", "preco", "link"]
-        writer = csv.DictWriter(csvfile, fieldnames=campos)
-        writer.writeheader()
-        for produto in prods_compra:
-            writer.writerow({k: produto[k] for k in campos})
-            
+    nome_arquivo = f"produtos_compra_{entry}_{timestamp}.csv"
+    try:    
+        with open(f"data\{nome_arquivo.replace(' ', '_').lower()}", "w", newline="", encoding="utf-8") as csvfile:
+            campos = ["titulo", "preco", "link"]
+            writer = csv.DictWriter(csvfile, fieldnames=campos)
+            writer.writeheader()
+            for produto in prods_compra:
+                writer.writerow({k: produto[k] for k in campos})
+    except Exception as e:
+        logging.critical(f"Erro ao criar {nome_arquivo}\nErro: {e}", exc_info=True)
+
 def main():
+    try:
+        os.makedirs("data", exist_ok=True)
+    except Exception as e:
+        logging.critical(f"Erro ao criar diretório 'data': {e}", exc_info=True)
+        return
+    
     termo_busca = input("Nome do produto: ")
 
     mercado_livre = Site(
@@ -163,10 +221,10 @@ def main():
     produtos_olx = obter_dados(olx, termo_busca)
     produtos_cpara = obter_dados(cmpar, termo_busca)
 
-    produtos_venda = produtos_mlivre + produtos_olx
+    produtos_venda = sorted(produtos_mlivre + produtos_olx, key=lambda x: x["preco"])
     produtos_compra = produtos_cpara
 
-    converte_csv(produtos_venda, produtos_compra)
+    converte_csv(produtos_venda, produtos_compra, termo_busca)
 
 if __name__ == "__main__":
     main()
