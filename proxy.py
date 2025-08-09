@@ -63,15 +63,15 @@ async def testar_todos_os_proxies(proxies, max_conexoes=50):
 #     with open(nome_arquivo, "w") as f:
 #         for proxy in proxies_validos:
 #             f.write(proxy + "\n")
-#     print(f"\n💾 Proxies salvos em: {nome_arquivo}")
+#     print(f"\nProxies salvos em: {nome_arquivo}")
 
 # Execução principal
 # if __name__ == "__main__":
 #     proxies = coletar_proxies()
-#     print(f"\n🔍 Total coletado: {len(proxies)}\n")
+#     print(f"\nTotal coletado: {len(proxies)}\n")
     
 #     proxies_ok = asyncio.run(testar_todos_os_proxies(proxies))
-#     print(f"\n✅ Proxies funcionando ({len(proxies_ok)}):")
+#     print(f"\nProxies funcionando ({len(proxies_ok)}):")
 #     for proxy in proxies_ok:
 #         print(proxy)
 
