@@ -19,7 +19,7 @@ logging.basicConfig(
     filename="erros_scraper.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.ERROR
+    level=logging.INFO
 )
 
 def extrair_preco(preco: str):
@@ -59,23 +59,28 @@ def scroll_lento(pagina, vezes=4):
         pagina.evaluate("window.scrollBy(0, window.innerHeight)")
         simular_humano(1.0, 2.0)
 
-def filtrar_produtos(dados: dict, entry):
+def filtrar_produtos(dados: dict, entry: str, site: Site):
     produtos_filtrados = []
     for produto in dados:
         try:
             titulo_palavras = produto["titulo"].lower().split()
             nome_pesquisa = entry.lower().split()
             if all(palavra in titulo_palavras for palavra in nome_pesquisa):
-                produto["preco"] = extrair_preco(produto["preco"])
-                if produto["preco"] is not None:
-                    produtos_filtrados.append(produto)
+                if site.nome != "Mercado Livre":
+                    produto["preco"] = extrair_preco(produto["preco"])
+                    if produto["preco"] is not None:
+                        produtos_filtrados.append(produto)
+                    else:
+                        logging.error(f"link: {produto['link']}")
                 else:
-                    logging.error(f"link: {produto['link']}")
+                    produto["preco"] = float(produto["preco"].replace(".", ""))
+                    produtos_filtrados.append(produto)
         except Exception as e:
             logging.error(f"Erro inesperado ao filtrar produto: {produto}\nErro: {e}", exc_info=True)
     return produtos_filtrados
 
-def scrape(site: Site, proxies: list):
+def scrape(site: Site, lista_proxies: list):
+    proxies = lista_proxies.copy()
     with sync_playwright() as p:
 
         def testar_proxy(proxy=None):
@@ -86,7 +91,7 @@ def scrape(site: Site, proxies: list):
                 "--disable-infobars"
             ]
             launch_args = {
-                "headless": False,
+                "headless": True,
                 "args": args
             }
             if proxy:
@@ -99,12 +104,28 @@ def scrape(site: Site, proxies: list):
                 locale="pt-BR",
                 viewport={"width": 1280, "height": 800},
                 java_script_enabled=True,
+                storage_state=None
             )
+
             pagina = contexto.new_page()
+            pagina.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                Object.defineProperty(navigator, 'mimeTypes', { get: () => [{type: 'application/pdf'}] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt'] });
+                Object.defineProperty(screen, 'width', { get: () => 1920 });
+                Object.defineProperty(screen, 'height', { get: () => 1080 });
+                delete window.chrome;
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'connection', { get: () => ({ downlink: 10, effectiveType: '4g', rtt: 50 }) });
+                window.WebGLRenderingContext = function () {};
+                navigator.mediaDevices = { enumerateDevices: () => Promise.resolve([{ kind: "videoinput" }]) };
+            """)
             pagina.set_default_navigation_timeout(90000)
 
             try:
-                pagina.goto(site.url)
+                pagina.goto(site.url, wait_until="domcontentloaded")
                 return navegador, contexto, pagina
             except Exception as e:
                 if proxy:
@@ -113,44 +134,76 @@ def scrape(site: Site, proxies: list):
                     logging.info(f"Falha ao navegar para {site.url} sem proxy")
                 navegador.close()
                 return None, None, None
-
+        
+        proxy_atual = None
         if proxies:
             for proxy in proxies:
+                print(f"Conectando a {site.nome} com {proxy}...")
                 navegador, contexto, pagina = testar_proxy(proxy)
                 if pagina is not None:
-                    logging.info(f"Proxy {proxy} testado com sucesso")
+                    proxy_atual = proxy
+                    print(f"Conectado com sucesso!")
+                    simular_humano()
+                    scroll_lento(pagina)
+                    pag = None
+
+                    if site.nome == "Compras Paraguai":
+                        try:
+                            pagina.wait_for_load_state(state='domcontentloaded')
+                            button = pagina.query_selector("button.btn.btn-blue")
+                            if button is not None:
+                                prox_pag = pagina.query_selector("a.truncate").get_attribute("href")
+                                pag = f"https://www.comprasparaguai.com.br{prox_pag}"
+                                pagina.goto(pag, wait_until="domcontentloaded")
+                            else:
+                                print(f"Não há necessidade de redirecionamento. Verificando a presença dos produtos...")
+                                try:
+                                    pagina.wait_for_selector(site.seletor_produto, timeout=30000)
+                                except Exception as e:
+                                    logging.error(f"Não foi encontrado o seletor dos produtos em {site.url}\nErro: {e}", exc_info=True)
+                                    proxies.remove(proxy_atual)
+                                    navegador.close()
+                                    print(f"Não foi encontrado o seletor dos produtos em {site.url}. Testando com o próximo proxy")
+                                    continue
+                                break
+                        except Exception as e:
+                            logging.error(f"Erro ao tentar redirecionar o navegador para: {pag}\nErro: {e}", exc_info=True)
+                            navegador.close()
+                            print(f"Erro ao redirecionar para {pag}. Testando com o próximo proxy...")
+                            continue
+
+                    simular_humano()
+                    scroll_lento(pagina)
+
+                    # Espera os produtos carregarem
+                    try:
+                        pagina.wait_for_selector(site.seletor_produto, timeout=30000)
+                    except Exception as e:
+                        logging.error(f"Não foi encontrado o seletor dos produtos em {pag or site.url}\nErro: {e}", exc_info=True)
+                        proxies.remove(proxy_atual)
+                        navegador.close()
+                        print(f"Não foi encontrado o seletor dos produtos em {site.url}. Testando com o próximo proxy")
+                        continue
                     break
+                    
+                print("Erro na conexão. Testando com o próximo proxy")
+
             else:
-                logging.info(f"Nenhum proxy funcionou para navegar ao site {site.url}")
+                print(f"Não foi possível conectar a {site.url} com os proxies disponíveis. Testando com IP local...")
+                navegador, contexto, pagina = testar_proxy()
+                if pagina is None:
+                    print("Não foi possível conectar, continuando a execução para o próximo site")
+                    return []
+                print("Conectado com sucesso!")
         else:
-            print("Não tem nenhum proxy")
+            print("Sem proxy disponível. Testanto com IP local...")
             navegador, contexto, pagina = testar_proxy()
             if pagina is None:
+                print("Não foi possível conectar, continuando a execução para o próximo site")
                 return []
-
-        simular_humano()
-        scroll_lento(pagina)
-
-        if site.nome == "Compras Paraguai":
-            try:
-                pagina.wait_for_selector("a.truncate", timeout=30000)
-                prox_pag = pagina.query_selector("a.truncate").get_attribute("href")
-                pag = f"https://www.comprasparaguai.com.br{prox_pag}"
-                pagina.goto(pag)
-            except Exception as e:
-                logging.error(f"Erro ao tentar redirecionar o navegador para: {pag}\nErro: {e}", exc_info=True)
-                return []
-
-        simular_humano()
-        scroll_lento(pagina)
-
-        # Espera os produtos carregarem
-        try:
-            pagina.wait_for_selector(site.seletor_produto, timeout=30000)
-        except Exception as e:
-            logging.error(f"Não foi encontrado o seletor dos produtos em {site.url}")
-            navegador.close()
-            return []
+            print("Conectado com sucesso!")
+        
+        print("Obtendo informações dos produtos...")
         
         produtos = pagina.query_selector_all(site.seletor_produto)
 
@@ -182,21 +235,33 @@ def scrape(site: Site, proxies: list):
         return resultados
 
 def obter_dados(site, entry, proxies):
+    print("Iniciando coleta dos dados...")
     prodBruto = scrape(site, proxies)
+    print("Coleta dos dados finalizada!")
 
     if len(prodBruto) == 0:
         logging.info(f"Não foi possível obter dados de {entry} em {site.nome}")
+        print(f"A coleta de dados no site {site.nome} a partir da entrada '{entry}' não retornou nenhum resultado")
         return prodBruto
 
-    prodFilt = filtrar_produtos(prodBruto, entry)
+    print("Iniciando filtragem dos dados...")
+
+    prodFilt = filtrar_produtos(prodBruto, entry, site)
+
+    print("Filtragem finalizada!")
 
     if len(prodFilt) == 0:
         logging.info(f"Não há resultados correspondentes a {entry} em {site.nome}")
+        print(f"O processo de filtragem dos dados obtidos de {site.nome} a partir da entrada '{entry}' não retornou nenhum resultado.")
         return prodFilt
 
     prodOrd = sorted(prodFilt, key=lambda x: x["preco"])
 
+    print("Criando arquivo json")
+
     converte_json(site, prodOrd, entry)
+
+    print("\n")
 
     return prodOrd
 
@@ -237,9 +302,7 @@ def carregar_proxies():
     print(f"\n🔍 Total coletado: {len(proxies)}\n")
     
     proxies_ok = asyncio.run(testar_todos_os_proxies(proxies))
-    print(f"\n✅ Proxies funcionando ({len(proxies_ok)}):")
-    for proxy in proxies_ok:
-        print(proxy)
+    print(f"\n✅ Proxies funcionando ({len(proxies_ok)})\n")
     return proxies_ok
 
 def main():
@@ -265,7 +328,7 @@ def main():
         f"https://lista.mercadolivre.com.br/{termo_busca.replace(' ', '-')}#D[A:{termo_busca.replace(' ', '-')}]",
         "div.ui-search-result__wrapper",
         "h3.poly-component__title-wrapper",
-        "div.poly-price__current"
+        "div.poly-price__current span.andes-money-amount__fraction"
     )
     olx = Site(
         "OLX",
